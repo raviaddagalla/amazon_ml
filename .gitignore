@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Datasets and Large Archives (exceeds GitHub 100MB limit)
+*.zip
+student_resource/dataset/
+dataset/
+
+# Large candidate and intermediate files (exceeds GitHub 100MB limit)
+student_resource/output/candidate_pairs.tsv
+student_resource/output/temp_partitions/
+output/candidate_pairs.tsv
+output/temp_partitions/
+
+# Media files
+*.mp4
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
