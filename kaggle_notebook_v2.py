@@ -94,14 +94,19 @@ print("\n" + "=" * 70)
 print("STEP 4: Running Tiered Cascade Inference (v2)")
 print("=" * 70)
 
-from src_v2.infer import run_full_inference_v2
-from src_v2.config import MATCHING_OUTPUT, CANDIDATE_OUTPUT
+# Purge any cached in-memory modules from previous notebook runs
+for mod in list(sys.modules.keys()):
+    if mod.startswith("src") or mod.startswith("src_v2"):
+        del sys.modules[mod]
 
-run_full_inference_v2(
-    matching_path=MATCHING_OUTPUT,
-    candidate_path=CANDIDATE_OUTPUT,
-    overwrite=True,
-)
+# Execute infer in a fresh subprocess so it ALWAYS loads the newly cloned code from disk
+subprocess.run([
+    sys.executable, "-m", "src_v2.infer", "--overwrite"
+], cwd=project_dir, check=True)
+
+# Output paths
+matching_output = os.path.join(resource_dir, "output", "matching_results.tsv")
+candidate_output = os.path.join(resource_dir, "output", "candidate_pairs.tsv")
 
 # =====================================================================
 # STEP 5: Validate submission
@@ -114,10 +119,10 @@ validator_script = os.path.join(resource_dir, "utils", "validate_submission.py")
 if os.path.exists(validator_script):
     result = subprocess.run([
         sys.executable, validator_script,
-        "--matching", MATCHING_OUTPUT,
-        "--candidate", CANDIDATE_OUTPUT,
+        "--matching", matching_output,
+        "--candidate", candidate_output,
         "--test-dir", test_dir,
-    ])
+    ], cwd=project_dir)
     if result.returncode == 0:
         print("\n✅ SUBMISSION VALIDATION PASSED!")
     else:
@@ -131,8 +136,8 @@ print("STEP 6: Copying outputs for download")
 print("=" * 70)
 
 for fname, src_path in [
-    ("matching_results.tsv", MATCHING_OUTPUT),
-    ("candidate_pairs.tsv", CANDIDATE_OUTPUT),
+    ("matching_results.tsv", matching_output),
+    ("candidate_pairs.tsv", candidate_output),
 ]:
     dst = os.path.join(KAGGLE_WORKING, fname)
     if os.path.exists(src_path):
