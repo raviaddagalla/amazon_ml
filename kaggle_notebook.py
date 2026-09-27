@@ -161,64 +161,66 @@ print("=" * 70)
 
 resource_dir = os.path.join(REPO_DIR, "student_resource")
 
+def find_file_in_kaggle(target_name):
+    """Search recursively for target_name under /kaggle/input."""
+    if not os.path.exists(KAGGLE_INPUT):
+        return None
+    for root, dirs, files in os.walk(KAGGLE_INPUT):
+        if target_name in files:
+            return os.path.join(root, target_name)
+    return None
+
 # 3a. Create dataset/test/ directory and symlink test TSVs
 test_dir = os.path.join(resource_dir, "dataset", "test")
 os.makedirs(test_dir, exist_ok=True)
 
-test_input_dir = os.path.join(KAGGLE_INPUT, TEST_DATASET)
-if not os.path.exists(test_input_dir):
-    # Try finding it with different naming conventions
-    candidates = [d for d in os.listdir(KAGGLE_INPUT) if 'test' in d.lower() or 'amazon' in d.lower()]
-    if candidates:
-        test_input_dir = os.path.join(KAGGLE_INPUT, candidates[0])
-        print(f"  Found test dataset at: {test_input_dir}")
-    else:
-        print(f"  ERROR: Test dataset not found! Available datasets: {os.listdir(KAGGLE_INPUT)}")
-        print(f"  Please add the test dataset to this notebook.")
-        sys.exit(1)
+test_files = ["test_source1.tsv", "test_source2.tsv", "test_source3.tsv"]
+missing_test_files = []
 
-for fname in ["test_source1.tsv", "test_source2.tsv", "test_source3.tsv"]:
-    src = os.path.join(test_input_dir, fname)
+for fname in test_files:
+    found_path = find_file_in_kaggle(fname)
     dst = os.path.join(test_dir, fname)
-    if os.path.exists(src):
-        os.symlink(src, dst)
-        print(f"  Linked {fname} -> {src}")
+    if found_path:
+        if os.path.islink(dst) or os.path.exists(dst):
+            os.remove(dst)
+        os.symlink(found_path, dst)
+        size_mb = os.path.getsize(found_path) / 1e6
+        print(f"  ✓ Linked {fname} ({size_mb:.1f} MB) <- {found_path}")
     else:
-        # Search recursively
-        for root, dirs, files in os.walk(test_input_dir):
-            if fname in files:
-                os.symlink(os.path.join(root, fname), dst)
-                print(f"  Linked {fname} -> {os.path.join(root, fname)}")
-                break
-        else:
-            print(f"  WARNING: {fname} not found in {test_input_dir}")
+        missing_test_files.append(fname)
+
+if missing_test_files:
+    print(f"\n❌ ERROR: Could not find required test file(s): {missing_test_files}")
+    print(f"Files currently visible in {KAGGLE_INPUT}:")
+    all_files = []
+    for root, dirs, files in os.walk(KAGGLE_INPUT):
+        for f in files:
+            all_files.append(os.path.join(root, f))
+    if all_files:
+        for f in all_files[:30]:
+            print(f"  - {f}")
+        if len(all_files) > 30:
+            print(f"  ... and {len(all_files) - 30} more files")
+    else:
+        print("  (Directory is empty or no files attached)")
+    sys.exit(1)
 
 # 3b. Create output directory and copy partial results
 output_dir = os.path.join(resource_dir, "output")
 temp_dir = os.path.join(output_dir, "temp_partitions")
 os.makedirs(temp_dir, exist_ok=True)
 
-partials_input_dir = os.path.join(KAGGLE_INPUT, PARTIALS_DATASET)
-if not os.path.exists(partials_input_dir):
-    candidates = [d for d in os.listdir(KAGGLE_INPUT) if 'partial' in d.lower()]
-    if candidates:
-        partials_input_dir = os.path.join(KAGGLE_INPUT, candidates[0])
-
-for fname in ["match_France.tsv", "cand_France.tsv", "match_US.tsv", "cand_US.tsv"]:
-    src = os.path.join(partials_input_dir, fname)
+partial_files = ["match_France.tsv", "cand_France.tsv", "match_US.tsv", "cand_US.tsv"]
+for fname in partial_files:
+    found_path = find_file_in_kaggle(fname)
     dst = os.path.join(temp_dir, fname)
-    if os.path.exists(src):
-        shutil.copy2(src, dst)
-        print(f"  Copied {fname} ({os.path.getsize(src) / 1e6:.1f} MB)")
+    if found_path:
+        shutil.copy2(found_path, dst)
+        size_mb = os.path.getsize(dst) / 1e6
+        print(f"  ✓ Reusing partial {fname} ({size_mb:.1f} MB) <- {found_path}")
     else:
-        # Search recursively
-        for root, dirs, files in os.walk(partials_input_dir):
-            if fname in files:
-                shutil.copy2(os.path.join(root, fname), dst)
-                print(f"  Copied {fname}")
-                break
-        else:
-            print(f"  WARNING: {fname} not found — will recompute {fname.split('_')[1].split('.')[0]}")
+        country_part = fname.split('_')[1].split('.')[0]
+        print(f"  ⚠ Note: {fname} not found in Kaggle input — {country_part} will be computed during inference")
 
 # 3c. Create train dir (for config import compatibility, even if empty)
 train_dir = os.path.join(resource_dir, "dataset", "train")
