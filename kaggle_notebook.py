@@ -102,12 +102,15 @@ if os.path.exists(KAGGLE_INPUT):
 
 # Option B: Clone from GitHub (Online mode)
 if not code_copied:
+    os.makedirs(KAGGLE_WORKING, exist_ok=True)
+    os.chdir(KAGGLE_WORKING)
+
     if os.path.exists(REPO_DIR):
         shutil.rmtree(REPO_DIR)
     
     print(f"Cloning from GitHub: {GITHUB_REPO} ...")
     try:
-        subprocess.run(["git", "clone", "--depth", "1", GITHUB_REPO, REPO_DIR], check=True)
+        subprocess.run(["git", "clone", "--depth", "1", GITHUB_REPO, REPO_DIR], cwd=KAGGLE_WORKING, check=True)
         print(f"Successfully cloned to {REPO_DIR}")
         code_copied = True
     except subprocess.CalledProcessError as e:

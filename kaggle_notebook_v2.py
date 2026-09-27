@@ -26,11 +26,15 @@ print("=" * 70)
 print("STEP 1: Obtaining repository code")
 print("=" * 70)
 
+# Reset Python's working directory to /kaggle/working to avoid orphaned directory errors on re-runs
+os.makedirs(KAGGLE_WORKING, exist_ok=True)
+os.chdir(KAGGLE_WORKING)
+
 if os.path.exists(REPO_DIR):
     shutil.rmtree(REPO_DIR)
 
 print(f"Cloning latest code from GitHub: {GITHUB_REPO} ...")
-subprocess.run(["git", "clone", "--depth", "1", GITHUB_REPO, REPO_DIR], check=True)
+subprocess.run(["git", "clone", "--depth", "1", GITHUB_REPO, REPO_DIR], cwd=KAGGLE_WORKING, check=True)
 print(f"Successfully cloned to {REPO_DIR}")
 
 # =====================================================================
