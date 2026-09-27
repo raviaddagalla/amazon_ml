@@ -76,21 +76,38 @@ def compute_pair_similarity_features(s1_sig: Dict, cand_sig: Dict, retrieval_sco
 
 def evaluate_tier1_match(s1_sig: Dict, cand_sig: Dict) -> bool:
     """
-    Tier 1: Exact canonical name match.
-    Auto-accept if names match exactly and numbers don't conflict.
+    Tier 1: Exact canonical name match with address consistency.
+    Auto-accept if canonical names match and addresses do not contradict.
     """
     if not s1_sig["canon_name"] or not cand_sig["canon_name"]:
         return False
     if s1_sig["canon_name"] != cand_sig["canon_name"]:
         return False
     
-    # If numbers exist on both sides, they must have at least one overlap
     nums1 = s1_sig["addr_nums_set"]
     nums2 = cand_sig["addr_nums_set"]
+    loc_overlap = len(set(s1_sig["locality_toks"]) & set(cand_sig["locality_toks"]))
+    
+    s1_addr = s1_sig["canon_addr"]
+    c_addr = cand_sig["canon_addr"]
+    a_set = fuzz.token_set_ratio(s1_addr, c_addr) if s1_addr and c_addr else 0.0
+
+    # Case A: Both records have numbers (street numbers / pincodes)
     if nums1 and nums2:
-        return len(nums1 & nums2) > 0
-    # If one or both lack numbers, name match alone is sufficient for Tier 1
-    return True
+        # Numbers MUST overlap
+        if not (nums1 & nums2):
+            return False
+        # And locality must not be completely contradictory
+        return loc_overlap >= 1 or a_set >= 45.0
+
+    # Case B: Both records have address text, but at least one lacks numbers
+    if s1_addr and c_addr:
+        # Require strong address text agreement or multiple shared locality tokens
+        return a_set >= 70.0 or loc_overlap >= 2
+
+    # Case C: One or both addresses are completely missing
+    # Only accept if name is distinctive (at least 2 core tokens and 10+ characters)
+    return len(s1_sig["core_name_toks"]) >= 2 and len(s1_sig["canon_name"]) >= 10
 
 
 def evaluate_tier2_match(s1_sig: Dict, cand_sig: Dict) -> bool:
@@ -98,19 +115,26 @@ def evaluate_tier2_match(s1_sig: Dict, cand_sig: Dict) -> bool:
     Tier 2: High-confidence fuzzy match with address anchor.
     Requires:
     1. Address numbers match exactly (at least 1 shared number)
-    2. Name token set ratio or Jaro-Winkler >= TIER2_NAME_SIM_BAR (0.85)
+    2. Address locality tokens not contradictory (loc_overlap >= 1 or a_set >= 45)
+    3. Name token set ratio or Jaro-Winkler >= TIER2_NAME_SIM_BAR (0.85)
     """
     nums1 = s1_sig["addr_nums_set"]
     nums2 = cand_sig["addr_nums_set"]
     if not (nums1 and nums2 and (nums1 & nums2)):
         return False  # Tier 2 strictly requires number anchor
     
+    loc_overlap = len(set(s1_sig["locality_toks"]) & set(cand_sig["locality_toks"]))
+    s1_addr = s1_sig["canon_addr"]
+    c_addr = cand_sig["canon_addr"]
+    a_set = fuzz.token_set_ratio(s1_addr, c_addr) if s1_addr and c_addr else 0.0
+    if loc_overlap == 0 and a_set < 45.0:
+        return False  # Conflicting city/state
+    
     s1_name = s1_sig["canon_name"]
     c_name = cand_sig["canon_name"]
     if not s1_name or not c_name:
         return False
     
-    # Check token set similarity and Jaro-Winkler
     token_sim = fuzz.token_set_ratio(s1_name, c_name) / 100.0
     jw_sim = distance.JaroWinkler.similarity(s1_name, c_name)
     

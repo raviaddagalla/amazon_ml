@@ -14,11 +14,17 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 
+import lightgbm as lgb
+import jellyfish
+
+from src.features import compute_pair_features
+from src.preprocessing import process_record_text
+
 from src_v2.config import (
     TEST_S1, TEST_S2, TEST_S3,
     MATCHING_OUTPUT, CANDIDATE_OUTPUT,
     TEMP_PARTITIONS_DIR, STUDENT_RESOURCE_ROOT,
-    TIER1_SCORE, TIER2_SCORE,
+    TIER1_SCORE, TIER2_SCORE, TIER3_PROB_THRESHOLD,
     TOP_CANDIDATES_PER_S1, BATCH_SIZE
 )
 from src_v2.canonicalize import get_record_signatures
@@ -72,12 +78,22 @@ def run_country_inference(
     n_pool = len(pool_df)
     print(f"  {country} Candidate pool: {n_pool:,} records", flush=True)
 
-    # 3. Precompute signatures for candidate pool
+    # 3. Precompute signatures and feature representations for candidate pool
     print(f"Precomputing signatures for {n_pool:,} pool candidates...", flush=True)
     pool_eids = pool_df["entity_id"].tolist()
+    pool_names = pool_df["business_name"].fillna("").tolist()
+    pool_addrs = pool_df["business_address"].fillna("").tolist()
     pool_sigs = []
-    for name, addr in zip(pool_df["business_name"], pool_df["business_address"]):
+    pool_name_toks = []
+    pool_addr_toks = []
+    pool_first = []
+
+    for name, addr in zip(pool_names, pool_addrs):
         pool_sigs.append(get_record_signatures(name, addr))
+        _, _, n_toks, a_toks, f_tok, _ = process_record_text(name, addr)
+        pool_name_toks.append(n_toks)
+        pool_addr_toks.append(a_toks)
+        pool_first.append(f_tok)
     del pool_df
     gc.collect()
 
@@ -87,21 +103,34 @@ def run_country_inference(
     inv_index.build_index(pool_sigs)
     print(f"  Index built with {len(inv_index.index):,} keys in {time.time()-t_start:.1f}s", flush=True)
 
+    # Load LightGBM model for Tier 3 residual classification
+    model_path = os.path.join(STUDENT_RESOURCE_ROOT, "code", "business_entity_resolution", "models", "lgbm_entity_resolver.txt")
+    bst = None
+    if os.path.exists(model_path):
+        print(f"Loading LightGBM model for Tier 3 from {model_path}...", flush=True)
+        bst = lgb.Booster(model_file=model_path)
+        print(f"  Model loaded with {bst.num_feature()} features.", flush=True)
+
     # 5. Process S1 entities and stream candidates
     print(f"Evaluating Tiered Cascade across {n_s1:,} S1 entities...", flush=True)
     candidate_matches = []  # (s1_id, cand_id, score)
     tier1_count = 0
     tier2_count = 0
+    tier3_count = 0
 
     t0 = time.time()
     with open(temp_cand_path, "w", encoding="utf-8") as fc:
         for batch_start in range(0, n_s1, BATCH_SIZE):
             batch_end = min(batch_start + BATCH_SIZE, n_s1)
             batch_s1 = s1_country_df.iloc[batch_start:batch_end]
+            tier3_batch_features = []
+            tier3_batch_meta = []
 
             for _, row in batch_s1.iterrows():
                 s1_id = row["entity_id"]
-                s1_sig = get_record_signatures(row["business_name"], row["business_address"])
+                s1_raw_name = str(row["business_name"]) if pd.notna(row["business_name"]) else ""
+                s1_raw_addr = str(row["business_address"]) if pd.notna(row["business_address"]) else ""
+                s1_sig = get_record_signatures(s1_raw_name, s1_raw_addr)
 
                 retrieved = inv_index.query(s1_sig, top_k=top_k)
                 cand_ids = [pool_eids[p_idx] for p_idx, _ in retrieved]
@@ -110,8 +139,11 @@ def run_country_inference(
                 cand_str = ",".join(cand_ids) if cand_ids else ""
                 fc.write(f"{s1_id}\t{cand_str}\n")
 
+                s1_pre = None
+                s1_norm_name, s1_norm_addr, s1_n_toks, s1_a_toks, s1_f_tok, s1_nums = process_record_text(s1_raw_name, s1_raw_addr)
+
                 # Evaluate tiers
-                for p_idx, _ in retrieved:
+                for p_idx, r_score in retrieved:
                     cand_id = pool_eids[p_idx]
                     c_sig = pool_sigs[p_idx]
 
@@ -121,13 +153,52 @@ def run_country_inference(
                     elif evaluate_tier2_match(s1_sig, c_sig):
                         candidate_matches.append((s1_id, cand_id, TIER2_SCORE))
                         tier2_count += 1
+                    elif bst is not None:
+                        # Prepare for Tier 3 LightGBM scoring
+                        if s1_pre is None:
+                            s1_pre = {
+                                's1_norm_name': s1_norm_name,
+                                's1_norm_addr': s1_norm_addr,
+                                's1_n_words': set(s1_n_toks),
+                                's1_a_words': set(s1_a_toks),
+                                's1_first_word': s1_f_tok,
+                                's1_nums': s1_nums,
+                                's1_name_sorted': " ".join(sorted(s1_n_toks)),
+                                's1_m0': jellyfish.metaphone(s1_f_tok) if s1_f_tok else "",
+                                's1_metaphones': {jellyfish.metaphone(w) for w in s1_n_toks if w},
+                                's1_street_num': next((n for n in s1_nums if len(n) <= 4), ""),
+                                's1_postal': next((n for n in reversed(s1_nums) if len(n) in (5, 6)), ""),
+                                's1_name_tokens_list': s1_n_toks,
+                            }
+                        feat = compute_pair_features(
+                            s1_raw_name, s1_raw_addr,
+                            pool_names[p_idx], pool_addrs[p_idx],
+                            pool_name_toks[p_idx], pool_addr_toks[p_idx],
+                            pool_first[p_idx],
+                            r_score,
+                            country=country,
+                            s1_precomputed=s1_pre,
+                        )
+                        tier3_batch_features.append(feat)
+                        tier3_batch_meta.append((s1_id, cand_id))
+
+            # Batch predict Tier 3 with LightGBM
+            if tier3_batch_features and bst is not None:
+                X_batch = np.array(tier3_batch_features, dtype=np.float32)
+                probs = bst.predict(X_batch)
+                for idx, (s1_id, cand_id) in enumerate(tier3_batch_meta):
+                    p = float(probs[idx])
+                    if p >= TIER3_PROB_THRESHOLD:
+                        candidate_matches.append((s1_id, cand_id, p))
+                        tier3_count += 1
+                del X_batch, probs, tier3_batch_features, tier3_batch_meta
 
             if (batch_end % 20000 == 0) or (batch_end == n_s1):
                 elapsed = time.time() - t0
                 rate = batch_end / max(elapsed, 0.001)
-                print(f"  Progress: {batch_end:,}/{n_s1:,} entities ({rate:.0f} ent/s) | Tier1: {tier1_count:,} | Tier2: {tier2_count:,}", flush=True)
+                print(f"  Progress: {batch_end:,}/{n_s1:,} entities ({rate:.0f} ent/s) | Tier1: {tier1_count:,} | Tier2: {tier2_count:,} | Tier3: {tier3_count:,}", flush=True)
 
-    del pool_eids, pool_sigs, inv_index
+    del pool_eids, pool_names, pool_addrs, pool_sigs, pool_name_toks, pool_addr_toks, pool_first, inv_index
     gc.collect()
 
     # 6. Apply bipartite mutual exclusivity resolution
