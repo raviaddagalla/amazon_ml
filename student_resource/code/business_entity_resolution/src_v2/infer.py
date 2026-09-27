@@ -84,17 +84,19 @@ def run_country_inference(
     pool_names = pool_df["business_name"].fillna("").tolist()
     pool_addrs = pool_df["business_address"].fillna("").tolist()
     pool_sigs = []
-    pool_name_toks = []
-    pool_addr_toks = []
+    pool_n_norm = []
+    pool_a_norm = []
+    pool_nums = []
     pool_first = []
 
     for name, addr in zip(pool_names, pool_addrs):
         pool_sigs.append(get_record_signatures(name, addr))
-        _, _, n_toks, a_toks, f_tok, _ = process_record_text(name, addr)
-        pool_name_toks.append(n_toks)
-        pool_addr_toks.append(a_toks)
+        c_n, c_a, _, _, f_tok, nums = process_record_text(name, addr)
+        pool_n_norm.append(c_n)
+        pool_a_norm.append(c_a)
+        pool_nums.append(tuple(nums))
         pool_first.append(f_tok)
-    del pool_df
+    del pool_df, pool_names, pool_addrs
     gc.collect()
 
     # 4. Build inverted index
@@ -140,7 +142,10 @@ def run_country_inference(
                 fc.write(f"{s1_id}\t{cand_str}\n")
 
                 s1_pre = None
-                s1_norm_name, s1_norm_addr, s1_n_toks, s1_a_toks, s1_f_tok, s1_nums = process_record_text(s1_raw_name, s1_raw_addr)
+                s1_norm_name, s1_norm_addr, s1_n_toks, s1_a_toks, s1_f_tok, s1_nums_list = process_record_text(s1_raw_name, s1_raw_addr)
+                s1_nums = set(s1_nums_list)
+                s1_n_words = set(s1_n_toks)
+                s1_a_words = set(s1_a_toks)
 
                 # Evaluate tiers
                 for p_idx, r_score in retrieved:
@@ -156,26 +161,36 @@ def run_country_inference(
                     elif bst is not None:
                         # Prepare for Tier 3 LightGBM scoring
                         if s1_pre is None:
-                            s1_pre = {
-                                's1_norm_name': s1_norm_name,
-                                's1_norm_addr': s1_norm_addr,
-                                's1_n_words': set(s1_n_toks),
-                                's1_a_words': set(s1_a_toks),
-                                's1_first_word': s1_f_tok,
-                                's1_nums': s1_nums,
-                                's1_name_sorted': " ".join(sorted(s1_n_toks)),
-                                's1_m0': jellyfish.metaphone(s1_f_tok) if s1_f_tok else "",
-                                's1_metaphones': {jellyfish.metaphone(w) for w in s1_n_toks if w},
-                                's1_street_num': next((n for n in s1_nums if len(n) <= 4), ""),
-                                's1_postal': next((n for n in reversed(s1_nums) if len(n) in (5, 6)), ""),
-                                's1_name_tokens_list': s1_n_toks,
-                            }
+                            s1_sorted = " ".join(sorted(s1_n_words)) if s1_n_words else ""
+                            s1_last = list(s1_n_words)[-1] if s1_n_words else ""
+                            s1_name_tokens_list = s1_norm_name.split() if s1_norm_name else []
+                            s1_m0 = jellyfish.metaphone(s1_f_tok) if s1_f_tok else ""
+                            s1_metaphones = {jellyfish.metaphone(w) for w in s1_n_words if w}
+                            s1_street_num = next((n for n in s1_nums if len(n) <= 4), "")
+                            s1_postal = next((n for n in s1_nums if len(n) in (5, 6)), "")
+                            s1_pre = (s1_sorted, s1_last, s1_name_tokens_list, s1_m0, s1_metaphones, s1_street_num, s1_postal)
+
+                        c_norm_n = pool_n_norm[p_idx]
+                        c_norm_a = pool_a_norm[p_idx]
+                        c_nums = set(pool_nums[p_idx])
+                        c_n_words = set(c_norm_n.split())
+                        c_a_words = set(c_norm_a.split())
+                        c_first = pool_first[p_idx]
+
                         feat = compute_pair_features(
-                            s1_raw_name, s1_raw_addr,
-                            pool_names[p_idx], pool_addrs[p_idx],
-                            pool_name_toks[p_idx], pool_addr_toks[p_idx],
-                            pool_first[p_idx],
-                            r_score,
+                            s1_norm_name,
+                            s1_norm_addr,
+                            s1_nums,
+                            s1_n_words,
+                            s1_a_words,
+                            s1_f_tok,
+                            c_norm_n,
+                            c_norm_a,
+                            c_nums,
+                            c_n_words,
+                            c_a_words,
+                            c_first,
+                            float(r_score),
                             country=country,
                             s1_precomputed=s1_pre,
                         )
@@ -198,7 +213,7 @@ def run_country_inference(
                 rate = batch_end / max(elapsed, 0.001)
                 print(f"  Progress: {batch_end:,}/{n_s1:,} entities ({rate:.0f} ent/s) | Tier1: {tier1_count:,} | Tier2: {tier2_count:,} | Tier3: {tier3_count:,}", flush=True)
 
-    del pool_eids, pool_names, pool_addrs, pool_sigs, pool_name_toks, pool_addr_toks, pool_first, inv_index
+    del pool_eids, pool_sigs, pool_n_norm, pool_a_norm, pool_nums, pool_first, inv_index
     gc.collect()
 
     # 6. Apply bipartite mutual exclusivity resolution
