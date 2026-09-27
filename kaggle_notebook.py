@@ -68,28 +68,89 @@ GITHUB_REPO = "https://github.com/raviaddagalla/amazon_ml.git"
 REPO_DIR = os.path.join(KAGGLE_WORKING, "amazon_ml")
 
 # =====================================================================
-# STEP 1: Clone the repository
+# STEP 1: Obtain the repository code
 # =====================================================================
 print("=" * 70)
-print("STEP 1: Cloning GitHub repository")
+print("STEP 1: Obtaining repository code")
 print("=" * 70)
 
-if os.path.exists(REPO_DIR):
-    shutil.rmtree(REPO_DIR)
+code_copied = False
 
-subprocess.run(["git", "clone", "--depth", "1", GITHUB_REPO, REPO_DIR], check=True)
-print(f"Cloned to {REPO_DIR}")
+# Option A: Check if code was added as a Kaggle dataset (Offline mode)
+if os.path.exists(KAGGLE_INPUT):
+    for entry in os.listdir(KAGGLE_INPUT):
+        entry_path = os.path.join(KAGGLE_INPUT, entry)
+        if os.path.isdir(entry_path):
+            # Check if this input folder contains student_resource directly or inside a subfolder
+            target_sr = None
+            if os.path.exists(os.path.join(entry_path, "student_resource")):
+                target_sr = entry_path
+            else:
+                for sub in os.listdir(entry_path):
+                    sub_p = os.path.join(entry_path, sub)
+                    if os.path.isdir(sub_p) and os.path.exists(os.path.join(sub_p, "student_resource")):
+                        target_sr = sub_p
+                        break
+            if target_sr:
+                print(f"  Found code dataset in Kaggle input: {target_sr}")
+                if os.path.exists(REPO_DIR):
+                    shutil.rmtree(REPO_DIR)
+                shutil.copytree(target_sr, REPO_DIR)
+                print(f"  Copied code to {REPO_DIR}")
+                code_copied = True
+                break
+
+# Option B: Clone from GitHub (Online mode)
+if not code_copied:
+    if os.path.exists(REPO_DIR):
+        shutil.rmtree(REPO_DIR)
+    
+    print(f"Cloning from GitHub: {GITHUB_REPO} ...")
+    try:
+        subprocess.run(["git", "clone", "--depth", "1", GITHUB_REPO, REPO_DIR], check=True)
+        print(f"Successfully cloned to {REPO_DIR}")
+        code_copied = True
+    except subprocess.CalledProcessError as e:
+        print("\n" + "!" * 70)
+        print("ERROR: Git clone failed! Could not reach github.com.")
+        print("!" * 70)
+        print("\nWHY THIS HAPPENED:")
+        print("  By default, Kaggle notebooks have INTERNET TURNED OFF.")
+        print("\nHOW TO FIX THIS IN 10 SECONDS:")
+        print("  1. Look at the right sidebar of your Kaggle notebook window.")
+        print("  2. In the 'Notebook options' / 'Settings' panel, find 'Internet'.")
+        print("  3. Toggle 'Internet' to ON (requires one-time SMS verification if not verified).")
+        print("  4. Re-run this cell!")
+        print("\nALTERNATIVE (OFFLINE MODE):")
+        print("  If you cannot turn on Internet, create a Kaggle dataset containing")
+        print("  the 'amazon_ml' repository files, add it to this notebook, and re-run.")
+        print("!" * 70 + "\n")
+        raise e
 
 # =====================================================================
 # STEP 2: Install dependencies
 # =====================================================================
 print("\n" + "=" * 70)
-print("STEP 2: Installing dependencies")
+print("STEP 2: Installing / verifying dependencies")
 print("=" * 70)
 
 req_file = os.path.join(REPO_DIR, "student_resource", "code", "business_entity_resolution", "requirements.txt")
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", req_file], check=True)
-print("Dependencies installed.")
+try:
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", req_file], check=True)
+    print("Dependencies installed successfully.")
+except Exception as e:
+    print(f"Warning: pip install encountered an issue: {e}")
+    print("Checking if pre-installed packages in Kaggle are sufficient...")
+    missing = []
+    for pkg in ["lightgbm", "duckdb", "rapidfuzz", "anyascii", "jellyfish", "pandas", "numpy", "scipy"]:
+        try:
+            __import__(pkg)
+            print(f"  ✓ {pkg} is available")
+        except ImportError:
+            missing.append(pkg)
+            print(f"  ✗ {pkg} is MISSING")
+    if missing:
+        raise RuntimeError(f"Missing required packages: {missing}. Please ensure Internet is ON to install them.")
 
 # =====================================================================
 # STEP 3: Set up directory structure with symlinks
