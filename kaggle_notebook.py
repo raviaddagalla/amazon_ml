@@ -1,0 +1,247 @@
+#!/usr/bin/env python3
+"""
+===================================================================
+KAGGLE NOTEBOOK: Business Entity Resolution — Full Test Inference
+===================================================================
+
+SETUP INSTRUCTIONS (do these ONCE before running this notebook):
+================================================================
+
+1. CREATE A KAGGLE DATASET with your test files:
+   - Go to https://kaggle.com/datasets → "New Dataset"
+   - Name it: "amazon-ml-2026-test"
+   - Upload these 3 files from your local machine:
+       student_resource/dataset/test/test_source1.tsv  (167 MB)
+       student_resource/dataset/test/test_source2.tsv  (486 MB)
+       student_resource/dataset/test/test_source3.tsv  (482 MB)
+   - Set visibility to "Private"
+   - Click "Create"
+
+2. Also upload these 2 local output files as ANOTHER dataset:
+   - Go to https://kaggle.com/datasets → "New Dataset"
+   - Name it: "amazon-ml-2026-partials"
+   - Upload:
+       student_resource/output/temp_partitions/match_France.tsv  (10.5 MB)
+       student_resource/output/temp_partitions/cand_France.tsv   (77 MB)
+       student_resource/output/temp_partitions/match_US.tsv      (26 MB)
+       student_resource/output/temp_partitions/cand_US.tsv       (195 MB)
+   - Set visibility to "Private"
+   - Click "Create"
+
+3. CREATE A NEW KAGGLE NOTEBOOK:
+   - Go to https://kaggle.com/code → "New Notebook"
+   - Set Accelerator to "None" (CPU only)
+   - Set Persistence to "Files"
+   - In the right sidebar, click "Add Data" → search for your datasets:
+       - "amazon-ml-2026-test"
+       - "amazon-ml-2026-partials"
+   - Paste this ENTIRE script into a single code cell
+   - Click "Run All"
+
+The notebook will:
+  1. Clone the GitHub repo
+  2. Install dependencies
+  3. Symlink datasets into the expected directory structure
+  4. Run inference for ALL 3 countries (reusing France & US partitions)
+  5. Assemble final submission files
+  6. Run the official validator
+  7. Save outputs to /kaggle/working/ for download
+"""
+
+import os
+import subprocess
+import sys
+import shutil
+
+# =====================================================================
+# CONFIGURATION — Update these paths if your dataset names differ
+# =====================================================================
+KAGGLE_INPUT = "/kaggle/input"
+KAGGLE_WORKING = "/kaggle/working"
+
+# Dataset names on Kaggle (the directory names under /kaggle/input/)
+# Kaggle converts dataset names to lowercase with hyphens
+TEST_DATASET = "amazon-ml-2026-test"       # Contains test_source1/2/3.tsv
+PARTIALS_DATASET = "amazon-ml-2026-partials"  # Contains match_France.tsv, etc.
+
+GITHUB_REPO = "https://github.com/raviaddagalla/amazon_ml.git"
+REPO_DIR = os.path.join(KAGGLE_WORKING, "amazon_ml")
+
+# =====================================================================
+# STEP 1: Clone the repository
+# =====================================================================
+print("=" * 70)
+print("STEP 1: Cloning GitHub repository")
+print("=" * 70)
+
+if os.path.exists(REPO_DIR):
+    shutil.rmtree(REPO_DIR)
+
+subprocess.run(["git", "clone", "--depth", "1", GITHUB_REPO, REPO_DIR], check=True)
+print(f"Cloned to {REPO_DIR}")
+
+# =====================================================================
+# STEP 2: Install dependencies
+# =====================================================================
+print("\n" + "=" * 70)
+print("STEP 2: Installing dependencies")
+print("=" * 70)
+
+req_file = os.path.join(REPO_DIR, "student_resource", "code", "business_entity_resolution", "requirements.txt")
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", req_file], check=True)
+print("Dependencies installed.")
+
+# =====================================================================
+# STEP 3: Set up directory structure with symlinks
+# =====================================================================
+print("\n" + "=" * 70)
+print("STEP 3: Setting up directory structure")
+print("=" * 70)
+
+resource_dir = os.path.join(REPO_DIR, "student_resource")
+
+# 3a. Create dataset/test/ directory and symlink test TSVs
+test_dir = os.path.join(resource_dir, "dataset", "test")
+os.makedirs(test_dir, exist_ok=True)
+
+test_input_dir = os.path.join(KAGGLE_INPUT, TEST_DATASET)
+if not os.path.exists(test_input_dir):
+    # Try finding it with different naming conventions
+    candidates = [d for d in os.listdir(KAGGLE_INPUT) if 'test' in d.lower() or 'amazon' in d.lower()]
+    if candidates:
+        test_input_dir = os.path.join(KAGGLE_INPUT, candidates[0])
+        print(f"  Found test dataset at: {test_input_dir}")
+    else:
+        print(f"  ERROR: Test dataset not found! Available datasets: {os.listdir(KAGGLE_INPUT)}")
+        print(f"  Please add the test dataset to this notebook.")
+        sys.exit(1)
+
+for fname in ["test_source1.tsv", "test_source2.tsv", "test_source3.tsv"]:
+    src = os.path.join(test_input_dir, fname)
+    dst = os.path.join(test_dir, fname)
+    if os.path.exists(src):
+        os.symlink(src, dst)
+        print(f"  Linked {fname} -> {src}")
+    else:
+        # Search recursively
+        for root, dirs, files in os.walk(test_input_dir):
+            if fname in files:
+                os.symlink(os.path.join(root, fname), dst)
+                print(f"  Linked {fname} -> {os.path.join(root, fname)}")
+                break
+        else:
+            print(f"  WARNING: {fname} not found in {test_input_dir}")
+
+# 3b. Create output directory and copy partial results
+output_dir = os.path.join(resource_dir, "output")
+temp_dir = os.path.join(output_dir, "temp_partitions")
+os.makedirs(temp_dir, exist_ok=True)
+
+partials_input_dir = os.path.join(KAGGLE_INPUT, PARTIALS_DATASET)
+if not os.path.exists(partials_input_dir):
+    candidates = [d for d in os.listdir(KAGGLE_INPUT) if 'partial' in d.lower()]
+    if candidates:
+        partials_input_dir = os.path.join(KAGGLE_INPUT, candidates[0])
+
+for fname in ["match_France.tsv", "cand_France.tsv", "match_US.tsv", "cand_US.tsv"]:
+    src = os.path.join(partials_input_dir, fname)
+    dst = os.path.join(temp_dir, fname)
+    if os.path.exists(src):
+        shutil.copy2(src, dst)
+        print(f"  Copied {fname} ({os.path.getsize(src) / 1e6:.1f} MB)")
+    else:
+        # Search recursively
+        for root, dirs, files in os.walk(partials_input_dir):
+            if fname in files:
+                shutil.copy2(os.path.join(root, fname), dst)
+                print(f"  Copied {fname}")
+                break
+        else:
+            print(f"  WARNING: {fname} not found — will recompute {fname.split('_')[1].split('.')[0]}")
+
+# 3c. Create train dir (for config import compatibility, even if empty)
+train_dir = os.path.join(resource_dir, "dataset", "train")
+os.makedirs(train_dir, exist_ok=True)
+
+# =====================================================================
+# STEP 4: Verify setup
+# =====================================================================
+print("\n" + "=" * 70)
+print("STEP 4: Verifying setup")
+print("=" * 70)
+
+project_dir = os.path.join(resource_dir, "code", "business_entity_resolution")
+model_path = os.path.join(project_dir, "models", "lgbm_entity_resolver.txt")
+print(f"  Project dir: {project_dir} (exists: {os.path.isdir(project_dir)})")
+print(f"  Model file:  {model_path} (exists: {os.path.isfile(model_path)})")
+print(f"  Test S1:     {os.path.join(test_dir, 'test_source1.tsv')} (exists: {os.path.isfile(os.path.join(test_dir, 'test_source1.tsv'))})")
+
+for f in os.listdir(temp_dir):
+    print(f"  Partial:     {f} ({os.path.getsize(os.path.join(temp_dir, f)) / 1e6:.1f} MB)")
+
+# =====================================================================
+# STEP 5: Run full inference
+# =====================================================================
+print("\n" + "=" * 70)
+print("STEP 5: Running full inference pipeline")
+print("=" * 70)
+
+# Add project to sys.path and run
+sys.path.insert(0, project_dir)
+os.chdir(project_dir)
+
+# Import and run
+from src.inference import run_full_inference
+from src.config import MATCHING_OUTPUT, CANDIDATE_OUTPUT
+
+run_full_inference(
+    matching_path=MATCHING_OUTPUT,
+    candidate_path=CANDIDATE_OUTPUT,
+    threshold=0.84,
+)
+
+# =====================================================================
+# STEP 6: Validate submission
+# =====================================================================
+print("\n" + "=" * 70)
+print("STEP 6: Running official submission validator")
+print("=" * 70)
+
+validator_script = os.path.join(resource_dir, "utils", "validate_submission.py")
+if os.path.exists(validator_script):
+    result = subprocess.run([
+        sys.executable, validator_script,
+        "--matching", MATCHING_OUTPUT,
+        "--candidate", CANDIDATE_OUTPUT,
+        "--test-dir", test_dir,
+    ])
+    if result.returncode == 0:
+        print("\n✅ SUBMISSION VALIDATION PASSED! Files are safe to submit.")
+    else:
+        print("\n❌ Validation failed. Check errors above.")
+else:
+    print(f"Validator not found at {validator_script}")
+
+# =====================================================================
+# STEP 7: Copy outputs to /kaggle/working for download
+# =====================================================================
+print("\n" + "=" * 70)
+print("STEP 7: Copying outputs for download")
+print("=" * 70)
+
+for fname, src_path in [
+    ("matching_results.tsv", MATCHING_OUTPUT),
+    ("candidate_pairs.tsv", CANDIDATE_OUTPUT),
+]:
+    dst = os.path.join(KAGGLE_WORKING, fname)
+    if os.path.exists(src_path):
+        shutil.copy2(src_path, dst)
+        size_mb = os.path.getsize(dst) / 1e6
+        with open(dst, "r") as f:
+            lines = sum(1 for _ in f) - 1  # minus header
+        print(f"  {fname}: {lines:,} rows, {size_mb:.1f} MB -> {dst}")
+
+print("\n" + "=" * 70)
+print("DONE! Download matching_results.tsv and candidate_pairs.tsv")
+print("from the Output tab on the right sidebar.")
+print("=" * 70)
