@@ -9,24 +9,35 @@ from src.config import MATCHING_OUTPUT, CANDIDATE_OUTPUT, PROBABILITY_THRESHOLD
 
 def resolve_mutual_exclusivity(
     scored_candidates: list[tuple[str, str, float]],
-    threshold: float = PROBABILITY_THRESHOLD
+    threshold: float = PROBABILITY_THRESHOLD,
+    margin: float = 0.0,
 ) -> dict[str, list[str]]:
     """Apply bipartite 1-to-1 assignment constraint on candidate matches.
 
     Each S2 or S3 entity represents a single noisy real-world business record
     and can match at most ONE Source 1 reference entity.
     If multiple S1 entities claim the same candidate above threshold,
-    the candidate is assigned exclusively to the S1 entity with the highest ML confidence score.
+    the candidate is assigned exclusively to the S1 entity with the highest ML confidence score,
+    optionally requiring a minimum margin over the runner-up score.
     """
-    best_assignment: dict[str, tuple[str, float]] = {}
+    best_assignment: dict[str, tuple[str, float, float]] = {}  # cand_id -> (s1_id, best_score, runner_up_score)
 
     for s1_id, cand_id, score in scored_candidates:
         if score >= threshold:
-            if cand_id not in best_assignment or score > best_assignment[cand_id][1]:
-                best_assignment[cand_id] = (s1_id, score)
+            if cand_id not in best_assignment:
+                best_assignment[cand_id] = (s1_id, score, 0.0)
+            else:
+                curr_s1, curr_best, curr_second = best_assignment[cand_id]
+                if score > curr_best:
+                    best_assignment[cand_id] = (s1_id, score, curr_best)
+                elif score > curr_second:
+                    best_assignment[cand_id] = (curr_s1, curr_best, score)
 
     final_matches: dict[str, list[str]] = defaultdict(list)
-    for cand_id, (s1_id, _) in best_assignment.items():
+    for cand_id, (s1_id, best_score, second_score) in best_assignment.items():
+        if margin > 0.0 and second_score > 0.0:
+            if (best_score - second_score) < margin:
+                continue  # Ambiguous conflict within margin: avoid false merge
         final_matches[s1_id].append(cand_id)
 
     return final_matches

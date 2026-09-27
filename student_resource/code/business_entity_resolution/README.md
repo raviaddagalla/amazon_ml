@@ -10,11 +10,12 @@ This repository contains the complete, self-contained, end-to-end reproducible p
 
 ### Key Technical Contributions:
 1. **Dynamic Country Partitioning**: Strictly enforces intra-country isolation with zero cross-country false positives, dynamically supporting open sets of countries (including France, US, India).
-2. **Universal Multi-Script Transliteration**: Offline normalization using `anyascii` converting multilingual Indic scripts (Devanagari, Tamil, Telugu, Bengali, Gujarati, Kannada, etc.) and accented European characters into standardized phonetic ASCII representations.
-3. **Multi-Key Weighted Inverted Index Blocking**: Captures primary brand tokens, 4-character prefix stems, bigram signatures, and address number-locality co-occurrences, achieving **>95.4% candidate recall ceiling** while reducing the candidate search space by **>99.8%**.
-4. **LightGBM Gradient Boosted Decision Tree Matcher**: Featurizes candidate pairs with 13 discriminative features across string similarity (RapidFuzz C++ AVX2 SIMD), token Jaccard overlaps, and street number match/mismatch penalties.
-5. **Bipartite 1-to-1 Mutual Exclusivity Resolver**: Enforces that each candidate from Source 2 or Source 3 is assigned to at most one Source 1 reference entity based on maximum ML confidence, eliminating false merges and maximizing the precision-weighted **macro F_0.5 score (0.9275 on validation)**.
-6. **Ultra-Low Memory Footprint (<1.5 GB RAM)**: Uses DuckDB columnar streaming and batch-oriented execution, easily running on standard machines without out-of-memory errors.
+2. **Universal Multi-Script Transliteration & Normalization**: Offline normalization using `anyascii` converting multilingual Indic scripts (Devanagari, Tamil, Telugu, Bengali, Gujarati, Kannada, etc.) and accented European characters into standardized phonetic ASCII representations, complemented by a bidirectional abbreviation dictionary (US, India, France) and corporate stopword pruning.
+3. **Multi-Key Weighted Inverted Index Blocking**: Captures primary brand tokens, phonetic metaphone keys (`jellyfish`), sorted-token signatures for word-order invariance, PIN/postal codes, and address number-locality composites.
+4. **LightGBM Matcher (34 Discriminative Features)**: Featurizes candidate pairs across 14 name features (Jaro-Winkler, Damerau-Levenshtein, LCS ratio, sorted-token ratio, token metaphones, initials match), 10 address features, 5 structured address component signals (street number match/mismatch, postal code match/mismatch), and number overlaps.
+5. **Realistic Distractor Mining & Threshold Calibration**: Fixed the fundamental training bug by mining hard negative distractors directly from the real 10.3M production candidate pool. Calibrated threshold sweep achieves **0.6862 validation Macro $F_{0.5}$** at threshold 0.84 (+0.0724 over the 0.6138 baseline and +0.1082 over the 0.578 leaderboard score).
+6. **Bipartite 1-to-1 Mutual Exclusivity Resolver**: Enforces that each candidate from Source 2 or Source 3 is assigned to at most one Source 1 reference entity based on maximum ML confidence, eliminating false merges and maximizing precision on singletons.
+7. **Ultra-Low Memory Footprint (<2 GB RAM)**: Uses DuckDB columnar streaming and batch-oriented execution, easily running on standard machines without out-of-memory errors.
 
 ---
 
@@ -22,16 +23,18 @@ This repository contains the complete, self-contained, end-to-end reproducible p
 
 ```
 business_entity_resolution/
+├── data/
+│   └── train_val_pairs_34feats.npz    # Pre-extracted 508k train & 95k val pairs (instant retraining)
 ├── models/
-│   └── lgbm_entity_resolver.txt       # Pre-trained LightGBM model artifact
+│   └── lgbm_entity_resolver.txt       # Trained 34-feature LightGBM model artifact
 ├── src/
 │   ├── __init__.py                    # Package initialization
-│   ├── config.py                      # Global paths, thresholds, and hyperparameter configs
-│   ├── preprocessing.py               # Text normalization, anyascii transliteration, number cleaner
-│   ├── blocking.py                    # Multi-key inverted index and candidate generation
-│   ├── features.py                    # 13 RapidFuzz and numeric feature extractors
-│   ├── train.py                       # Training pipeline on train_source1/2/3 and ground truth
-│   ├── inference.py                   # Streaming country-partitioned inference pipeline
+│   ├── config.py                      # Paths, abbreviations, threshold (0.84), hyperparameter configs
+│   ├── preprocessing.py               # Normalization, anyascii transliteration, abbreviation expansion
+│   ├── blocking.py                    # Multi-key inverted index blocking (phonetic, sorted, pin, brand)
+│   ├── features.py                    # 34 RapidFuzz, phonetic metaphone, and numeric feature extractors
+│   ├── train.py                       # Training pipeline with realistic distractor mining & threshold sweep
+│   ├── inference.py                   # High-performance streaming country-partitioned inference
 │   └── postprocessing.py              # Mutual exclusivity resolver and submission TSV exporters
 ├── run_pipeline.py                    # Master CLI script (reproduces outputs end-to-end)
 ├── README.md                          # Reproduction documentation (this file)
@@ -42,7 +45,7 @@ business_entity_resolution/
 
 ## 3. Environment Setup & Installation
 
-The solution is developed in pure Python 3.10+ (tested on Python 3.13) without proprietary dependencies or external network lookups.
+The solution is developed in pure Python 3.10+ without proprietary dependencies or external network lookups.
 
 Install the required pinned dependencies:
 ```bash
@@ -59,8 +62,14 @@ To generate the final submission files (`output/matching_results.tsv` and `outpu
 python run_pipeline.py --infer --validate
 ```
 
+### Instant Retraining (< 1 Minute)
+Retrain the LightGBM model directly from the saved 34-feature training pairs archive and run validation:
+```bash
+python run_pipeline.py --train --use-saved-pairs
+```
+
 ### Full Retraining from Scratch
-To retrain the LightGBM model on training data, run inference, and validate:
+To retrain the LightGBM model from raw TSV data with full distractor mining, run inference, and validate:
 ```bash
 python run_pipeline.py --train --infer --validate
 ```

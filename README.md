@@ -23,31 +23,36 @@ In large-scale commercial platforms, business identity data arrives from multipl
 Raw Multi-Source Records (S1, S2, S3)
                 │
                 ▼
-  [Text Preprocessing & Transliteration]
-    • Unicode NFKD & AnyAscii Phonetic Transliteration (Devanagari, Tamil, Telugu → Latin)
-    • Legal suffix normalization (Corp/Corporation, Pvt/Private/Ltd, Inc, LLC)
-    • Numerical extraction with zero-padding stripping ("0017560" → "17560")
+  [Text Preprocessing, Abbreviation Expansion & Transliteration]
+    • Unicode NFKD & AnyAscii Phonetic Transliteration (Indic scripts → Latin)
+    • Bidirectional abbreviation expansion (US, India, France)
+    • Corporate stopword pruning (pvt, ltd, corp, sarl, sas, etc.)
+    • S3 ID suffix stripping (ID: \d+)
                 │
                 ▼
-  [Multi-Key Inverted Index Blocking Engine]
-    • Composite keys: Name bigrams, salient tokens, composite name-number & address keys
+  [Multi-Strategy Inverted Index Blocking Engine]
+    • 6 high-recall, low-collision keys:
+        - Primary name tokens (n1:) & bigrams (nb:)
+        - Phonetic metaphone keys (m1:) via jellyfish
+        - Sorted-token signatures (nsort:) for word-order transposition invariance
+        - Postal / PIN codes (pin:) and number-locality composites (na:)
     • C-array (array('i')) posting lists with frequency capping (postings > 500 pruned)
-    • High-recall candidate generation: >95.4% ground truth recall ceiling in Top-25 candidates
+    • Top-30 candidates per S1 entity exported to candidate_pairs.tsv
                 │
                 ▼
-  [LightGBM GBDT Pair Classifier]
-    • 13 Dense features via RapidFuzz C++ SIMD:
-        - Name token set, token sort, partial, and Levenshtein ratios
-        - Word-level Jaccard overlaps and first-word exact match indicators
-        - Address partial & token set ratios
-        - House number / PIN code exact matches and mismatch penalties
-    • Open-source under MIT license (<8B parameter constraint compliant)
+  [LightGBM GBDT Pair Classifier (34 Features)]
+    • 34 Dense features via RapidFuzz C++ SIMD and phonetic algorithms:
+        - 14 Name similarity & phonetic features (Jaro-Winkler, Damerau-Levenshtein, LCS ratio, sorted ratio, initials, metaphones)
+        - 10 Address distance, presence, and ratio features
+        - 5 Structured address component signals (street number match/mismatch, postal code match/mismatch)
+        - 3 Numeric overlap indicators + 2 metadata features
+    • Trained on 508k pairs with realistic hard negatives mined from the full 10.3M production pool
                 │
                 ▼
   [Bipartite 1-to-1 Mutual Exclusivity Post-Processing]
     • Domain constraint enforcement: candidate records matched at most once across S1 entities
     • Competitive resolution: candidates assigned to highest ML probability argmax
-    • Precision-heavy Macro F_0.5 threshold optimization at P >= 0.40
+    • Precision-heavy Macro F_0.5 calibrated decision threshold at P >= 0.84
                 │
                 ▼
   Official Outputs: matching_results.tsv & candidate_pairs.tsv
@@ -55,19 +60,30 @@ Raw Multi-Source Records (S1, S2, S3)
 
 ---
 
-## 3. Results & Evaluation
+## 3. Results & Evaluation Benchmarks
 
-| Evaluation Metric | Baseline Blocking | GBDT (Raw P ≥ 0.50) | **Final Model + 1-to-1 Mutual Exclusivity (P ≥ 0.40)** |
-|:---|:---:|:---:|:---:|
-| **Validation Macro $F_{0.5}$** | 0.1415 | 0.8363 | **0.9275** |
-| **Validation Macro Precision** | 0.0682 | 0.8351 | **0.9412** |
-| **Validation Macro Recall** | **0.9542** | 0.8410 | **0.8765** |
-| **Singletons Correctness** | N/A | 96.2% | **100.0%** (Zero false merges on true singletons) |
+### 3.1 Macro $F_{0.5}$ Progression across Engineering Milestones
 
-### Validation Status
-- Passed official submission validator (`utils/validate_submission.py`) with:
-  `PASS — no blocking issues found. Safe to submit.`
-- Exact row count: **1,732,544 rows** (249,915 singletons, 1,482,629 non-empty matches).
+| Pipeline Version | Candidate Features | Distractor Mining Pool | Calibrated Threshold | Validation Macro $F_{0.5}$ | Delta vs Baseline |
+|:---|:---:|:---:|:---:|:---:|:---:|
+| **Baseline (Old)** | 13 features | 80,000 synthetic | 0.50 (default) | **0.6138** | — |
+| **Baseline (Threshold Shift)** | 13 features | 80,000 synthetic | 0.95 | **0.6689** | +0.0551 |
+| **Phase 4 (34 Features)** | 34 features | 80,000 synthetic | 0.88 | **0.6720** | +0.0582 |
+| **Phase 5A (34 Feats + Real Mining)** | 34 features | **10.3M Full Pool** | 0.84 | **0.6862** | **+0.0724** |
+| **Phase 5B (CatBoost Solo)** | 34 features | **10.3M Full Pool** | 0.92 | **0.6819** | +0.0681 |
+| **Phase 5B (LGBM 70% + CatBoost 30%)** | 34 features | **10.3M Full Pool** | 0.84 | **0.6864** | **+0.0726** |
+
+### 3.2 Threshold Calibration Breakdown on Upgraded 34-Feature Model
+
+| Threshold | Macro $F_{0.5}$ | Macro Precision | Macro Recall | Notes |
+|:---:|:---:|:---:|:---:|:---|
+| 0.50 | 0.6712 | 0.8340 | 0.5821 | Old default threshold (+0.0574 over old model) |
+| 0.60 | 0.6758 | 0.8465 | 0.5794 | |
+| 0.70 | 0.6801 | 0.8612 | 0.5742 | |
+| 0.80 | 0.6854 | 0.8785 | 0.5684 | |
+| **0.84** | **0.6862** | **0.8835** | **0.5661** | **Optimal calibrated threshold** |
+| 0.88 | 0.6860 | 0.8904 | 0.5601 | High precision plateau |
+| 0.92 | 0.6845 | 0.8980 | 0.5520 | Recall drops slightly |
 
 ---
 
@@ -79,22 +95,28 @@ Raw Multi-Source Records (S1, S2, S3)
 ├── student_resource/
 │   ├── Documentation_template.md             # Complete methodology write-up
 │   ├── output/
-│   │   └── matching_results.tsv              # Leaderboard prediction results (1.73M entities)
+│   │   ├── matching_results.tsv              # Leaderboard prediction results (1.73M entities)
+│   │   └── candidate_pairs.tsv               # Candidate pairs results
 │   ├── utils/
 │   │   └── validate_submission.py            # Official validator script
 │   └── code/
 │       └── business_entity_resolution/
+│           ├── data/
+│           │   └── train_val_pairs_34feats.npz  # Pre-extracted 508k pairs (instant retraining)
+│           ├── docs/
+│           │   ├── eda_findings.md           # Exploratory data analysis findings
+│           │   └── evaluation_results.md     # Full benchmark tables and sweeps
+│           ├── models/
+│           │   └── lgbm_entity_resolver.txt  # Trained 34-feature LightGBM model artifact
 │           ├── src/
 │           │   ├── __init__.py
-│           │   ├── config.py                 # Paths, thresholds, legal stopwords
-│           │   ├── preprocessing.py          # Transliteration & string cleaners
-│           │   ├── blocking.py               # Inverted index blocking engine
-│           │   ├── features.py               # 13 RapidFuzz & numeric feature extractors
-│           │   ├── train.py                  # LightGBM GBDT training pipeline
+│           │   ├── config.py                 # Paths, thresholds, legal stopwords, abbreviations
+│           │   ├── preprocessing.py          # Transliteration, normalizer, abbreviation expansion
+│           │   ├── blocking.py               # 6-strategy multi-key inverted index blocking
+│           │   ├── features.py               # 34 RapidFuzz, phonetic, and numeric feature extractors
+│           │   ├── train.py                  # Training pipeline with realistic distractor mining
 │           │   ├── postprocessing.py         # 1-to-1 mutual exclusivity resolver
-│           │   └── inference.py              # Low-memory streaming inference engine
-│           ├── models/
-│           │   └── lgbm_entity_resolver.txt  # Pre-trained LightGBM model weights
+│           │   └── inference.py              # Streaming country-partitioned inference engine
 │           ├── run_pipeline.py               # Master CLI execution runner
 │           ├── README.md                     # Pipeline-specific documentation
 │           └── requirements.txt              # Pinned dependencies
@@ -107,7 +129,7 @@ Raw Multi-Source Records (S1, S2, S3)
 ## 5. Getting Started & Reproduction
 
 ### Prerequisites
-- Python 3.10+ (tested on Python 3.13)
+- Python 3.10+
 - Windows / Linux / macOS
 
 ```bash
@@ -117,9 +139,12 @@ pip install -r requirements.txt
 
 ### Run End-to-End Pipeline
 ```bash
-# Run full streaming inference and validate submission
+# 1. Instant Retrain from pre-extracted pairs archive (< 1 minute):
+python run_pipeline.py --train --use-saved-pairs
+
+# 2. Run full streaming inference on test set and validate submission:
 python run_pipeline.py --infer --validate
 
-# Or train model from scratch, infer, and validate:
+# 3. Or run complete pipeline from scratch:
 python run_pipeline.py --all
 ```

@@ -1,5 +1,6 @@
 """
 High-Performance Streaming Inference Pipeline for Full Test Set Entity Resolution
+(Phase 5/6 upgrade: uses expanded features, address components, configurable threshold)
 """
 
 import os
@@ -10,13 +11,15 @@ from collections import Counter, defaultdict
 import duckdb
 import numpy as np
 import lightgbm as lgb
+import jellyfish
 
 from src.config import (
     TEST_S1, TEST_S2, TEST_S3, MODEL_PATH, OUTPUT_DIR,
     MATCHING_OUTPUT, CANDIDATE_OUTPUT,
-    TOP_CANDIDATES_PER_S1, PROBABILITY_THRESHOLD
+    TOP_CANDIDATES_PER_S1, PROBABILITY_THRESHOLD,
+    MAX_BLOCKING_KEY_SIZE,
 )
-from src.preprocessing import process_record_text
+from src.preprocessing import process_record_text, extract_address_components
 from src.blocking import get_blocking_keys_from_tokens
 from src.features import compute_pair_features
 
@@ -24,7 +27,8 @@ from src.features import compute_pair_features
 def run_country_inference(
     country: str,
     bst: lgb.Booster,
-    temp_dir: str
+    temp_dir: str,
+    threshold: float = PROBABILITY_THRESHOLD,
 ) -> tuple[str, str]:
     """
     Process a single country partition with minimal RAM and stream outputs directly to disk.
@@ -95,14 +99,14 @@ def run_country_inference(
             postings = inv_index.get(k)
             if postings is None:
                 inv_index[k] = array('i', [idx])
-            elif len(postings) <= 500:
+            elif len(postings) <= MAX_BLOCKING_KEY_SIZE:
                 postings.append(idx)
 
     del pool_df, pool_names, pool_addrs
     gc.collect()
     print(f"Candidate pool pre-normalized & indexed in {time.time()-t0:.2f}s. Unique keys: {len(inv_index):,}", flush=True)
 
-    # 4. Stream S1 entities in batches, write candidates to disk, and update best assignments on-the-fly
+    # 4. Stream S1 entities in batches
     safe_name = country.replace(" ", "_")
     temp_match_path = os.path.join(temp_dir, f"match_{safe_name}.tsv")
     temp_cand_path = os.path.join(temp_dir, f"cand_{safe_name}.tsv")
@@ -129,15 +133,25 @@ def run_country_inference(
                 s1_n_words = set(n_toks)
                 s1_a_words = set(a_toks)
 
+                s1_sorted = " ".join(sorted(s1_n_words)) if s1_n_words else ""
+                s1_last = list(s1_n_words)[-1] if s1_n_words else ""
+                s1_name_tokens_list = s1_name_norm.split() if s1_name_norm else []
+                s1_m0 = jellyfish.metaphone(s1_first_word) if s1_first_word else ""
+                s1_metaphones = {jellyfish.metaphone(w) for w in s1_n_words if w}
+                s1_street_num = next((n for n in s1_nums if len(n) <= 4), "")
+                s1_postal = next((n for n in s1_nums if len(n) in (5, 6)), "")
+                s1_pre = (s1_sorted, s1_last, s1_name_tokens_list, s1_m0, s1_metaphones, s1_street_num, s1_postal)
+
                 s1_keys = get_blocking_keys_from_tokens(n_toks, a_toks, nums)
                 cand_weights = Counter()
                 for k in s1_keys:
                     postings = inv_index.get(k)
-                    if postings is None or len(postings) > 500:
+                    if postings is None or len(postings) > MAX_BLOCKING_KEY_SIZE:
                         continue
-                    w = 5.0 if (k.startswith("n1:") or k.startswith("nb:")) else (
-                        3.0 if k.startswith("pin:") else (2.0 if k.startswith("na:") else 1.0)
-                    )
+                    w = (5.0 if (k.startswith("n1:") or k.startswith("nb:") or k.startswith("m1:"))
+                         else (4.0 if k.startswith("nsort:")
+                               else (3.0 if k.startswith("pin:")
+                                     else (2.0 if (k.startswith("na:") or k.startswith("n2:") or k.startswith("npref:")) else 1.0))))
                     for pool_idx in postings:
                         cand_weights[pool_idx] += w
 
@@ -159,7 +173,9 @@ def run_country_inference(
                         set(pool_n_norm[pool_idx].split()),
                         set(pool_a_norm[pool_idx].split()),
                         pool_first[pool_idx],
-                        blk_score
+                        blk_score,
+                        country=country,
+                        s1_precomputed=s1_pre,
                     )
                     batch_features.append(feat)
                     batch_meta.append((s1_id, cand_eid))
@@ -169,7 +185,7 @@ def run_country_inference(
                 probs = bst.predict(X_batch)
                 for idx, (s1_id, cand_eid) in enumerate(batch_meta):
                     p = float(probs[idx])
-                    if p >= PROBABILITY_THRESHOLD:
+                    if p >= threshold:
                         prev = best_assignment.get(cand_eid)
                         if prev is None or p > prev[1]:
                             best_assignment[cand_eid] = (s1_id, p)
@@ -212,7 +228,9 @@ def run_country_inference(
 def run_full_inference(
     matching_path: str = MATCHING_OUTPUT,
     candidate_path: str = CANDIDATE_OUTPUT,
-    countries_to_process: list[str] | None = None
+    countries_to_process: list[str] | None = None,
+    threshold: float = PROBABILITY_THRESHOLD,
+    overwrite: bool = False,
 ) -> None:
     """
     Run full test inference across all countries and export submission files.
@@ -226,6 +244,7 @@ def run_full_inference(
 
     print(f"Loading LightGBM model from {MODEL_PATH}...", flush=True)
     bst = lgb.Booster(model_file=MODEL_PATH)
+    print(f"  Model has {bst.num_feature()} features, {bst.num_trees()} trees")
     
     con = duckdb.connect()
 
@@ -243,6 +262,7 @@ def run_full_inference(
 
     target_countries = countries_to_process or available_countries
     print(f"Countries to process in this run: {target_countries}", flush=True)
+    print(f"Using threshold: {threshold:.2f} (overwrite={overwrite})", flush=True)
 
     t_pipeline = time.time()
     partition_match_files = []
@@ -254,7 +274,7 @@ def run_full_inference(
         c_path = os.path.join(temp_dir, f"cand_{safe_name}.tsv")
         
         # Check if complete partition files already exist
-        if os.path.exists(m_path) and os.path.exists(c_path):
+        if not overwrite and os.path.exists(m_path) and os.path.exists(c_path):
             expected_s1 = con.execute(f"""
                 SELECT count(*) FROM read_csv('{TEST_S1}', delim='\\t', header=true, quote='', escape='') 
                 WHERE country = '{country}';
@@ -267,7 +287,7 @@ def run_full_inference(
                 partition_cand_files.append(c_path)
                 continue
 
-        m_path, c_path = run_country_inference(country, bst, temp_dir)
+        m_path, c_path = run_country_inference(country, bst, temp_dir, threshold=threshold)
         if m_path and c_path:
             partition_match_files.append(m_path)
             partition_cand_files.append(c_path)
@@ -334,4 +354,16 @@ def run_full_inference(
 
 
 if __name__ == "__main__":
-    run_full_inference()
+    import argparse
+    parser = argparse.ArgumentParser(description="Streaming inference for Business Entity Resolution")
+    parser.add_argument("--countries", nargs="+", default=None, help="Specific countries to process")
+    parser.add_argument("--threshold", type=float, default=PROBABILITY_THRESHOLD, help="Matching probability threshold")
+    parser.add_argument("--overwrite", action="store_true", help="Force recomputing partition files even if they exist")
+    args = parser.parse_args()
+
+    run_full_inference(
+        countries_to_process=args.countries,
+        threshold=args.threshold,
+        overwrite=args.overwrite,
+    )
+
